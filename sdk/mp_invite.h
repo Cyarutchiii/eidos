@@ -30,6 +30,7 @@ typedef struct BwMpInviteView {
     BwMpInviteKind kind;
     u32 peer;
     u32 request_id;
+    int initiator;
 } BwMpInviteView;
 
 typedef struct BwMpInviteIO {
@@ -45,6 +46,8 @@ void bw_mp_invite_reset(void);
 BwMpInviteView bw_mp_invite_view(void);
 int  bw_mp_invite_request(u32 peer, BwMpInviteKind kind, u64 now_ms);
 int  bw_mp_invite_reply(int accept, u64 now_ms);
+/* Exchange matching readiness and take the agreed handoff once. */
+int bw_mp_invite_ready(BwMpInviteView *out);
 void bw_mp_invite_dismiss(void);  /* cancels a pending request, closes a result */
 int  bw_mp_invite_message(u32 peer, const void *data, u32 size, u64 now_ms);
 void bw_mp_invite_tick(u64 now_ms);

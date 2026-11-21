@@ -9,7 +9,8 @@
  * the relay under BW_MOD_NET_LINK_KEY.  Everyone in the session is in
  * radio range of everyone else.
  *
- * A Link session and a co-op session (sdk/mp.h) are never open at once.
+ * Standalone Link sessions and co-op are mutually exclusive. A private
+ * invitation can attach the radio to the existing co-op relay instead.
  */
 #ifndef BW_PORT_LINK_H
 #define BW_PORT_LINK_H
@@ -51,6 +52,11 @@ int  bw_link_on_air(void);
 
 /* Each frame, on the game's thread: notices the end of the session.      */
 void bw_link_frame(void);
+
+/* Borrow the current co-op connection for one addressed radio pair. */
+int bw_link_pair_available(void);
+int bw_link_pair_open(u32 peer, u32 request, int initiator);
+void bw_link_pair_close(void);
 
 /* The console's wireless MAC address in a Link: the firmware's, unless that
  * is the port's default (every profile has it), in which case a random

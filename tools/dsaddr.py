@@ -1691,6 +1691,58 @@ def main(argv=None) -> int:
         source = _need(source, "tcbl->workSize = workSize;",
                                 "tcbl->workSize = (workSize + sizeof(void *) - 1) & ~(sizeof(void *) - 1);")
         source = "#define tcbl_File sub_0203101C_File\n" + source
+    if a.cut_asm and src_path.replace("\\", "/").endswith("/src/game/ov019/union_oneself.c"):
+        # A paired invitation supplies the same object ID as the native
+        # A-button path. Leave the game's negotiation and timers in charge.
+        original = """    if (KEY_GetTrg() & 1) {
+        FIELD_PLAYER_GetFrontGridPos(fieldPlayer, (short *)((&gridX)), (short *)((&gridY)), (&gridZ));
+        mmdl = FLDMMDL_SysSearchGridPos(mmdlSys, gridX, gridZ, 0);
+        if (mmdl == 0) {
+            return 0;
+        }
+        objId = FLDMMDL_GetObjId(mmdl);
+"""
+        paired = """    extern int bw_mp_union_auto_talk(int started);
+    extern int bw_mp_union_return_requested(void);
+    u16 invitedObjId = 0xffff;
+
+    if (bw_mp_union_return_requested()) {
+        work->fieldRequest = 1;
+        return 0;
+    }
+    if (bw_mp_union_auto_talk(0)) {
+        for (beaconIndex = 0; beaconIndex < UNION_BEACON_PC_MAX; beaconIndex++) {
+            const UnionBeaconPc *peer = &work->beaconPc[beaconIndex];
+            u16 candidate = (u16)((peer->index << 8) | 0x20);
+            if (peer->life != 0 && peer->beacon.valid == 1 &&
+                peer->beacon.status == 0 && UNION_CHARA_CheckTalkable(work, candidate)) {
+                invitedObjId = candidate;
+                break;
+            }
+        }
+    }
+    if (invitedObjId != 0xffff || (KEY_GetTrg() & 1)) {
+        if (invitedObjId != 0xffff) {
+            objId = invitedObjId;
+            bw_mp_union_auto_talk(1);
+        } else {
+            FIELD_PLAYER_GetFrontGridPos(fieldPlayer, &gridX, &gridY, &gridZ);
+            mmdl = FLDMMDL_SysSearchGridPos(mmdlSys, gridX, gridZ, 0);
+            if (mmdl == 0) {
+                return 0;
+            }
+            objId = FLDMMDL_GetObjId(mmdl);
+        }
+"""
+        source = _need(source, original, paired)
+        source = _need(source, """    UnionOneselfActionFunc func;
+
+    switch (situation->phase) {""", """    UnionOneselfActionFunc func;
+    extern void bw_mp_union_native_active(void);
+
+    if (situation->playCategory == 5 || situation->playCategory == 6)
+        bw_mp_union_native_active();
+    switch (situation->phase) {""")
     if a.cut_list or a.cut_asm:
         import gamecut
         drop = set()

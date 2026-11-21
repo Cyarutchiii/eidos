@@ -130,6 +130,40 @@ int main(void)
           strcmp(sent, "answer 74 0") == 0);
     bw_mp_invite_tick(730 + BW_MP_INVITE_TIMEOUT_MS + 5000);
     CHECK("expired result clears", bw_mp_invite_view().state == BW_MP_INVITE_NONE);
+    CHECK("accepted offer waits for readiness from both peers",
+          bw_mp_invite_message(2, "invite 75 2", 11, 62000) == 1 &&
+          bw_mp_invite_reply(1, 62001) == 0 && !bw_mp_invite_ready(&v));
+    CHECK("readiness includes the same request and activity",
+          strcmp(sent, "mpjoin 75 2") == 0);
+    CHECK("wrong sender cannot begin handoff",
+          bw_mp_invite_message(3, "mpjoin 75 2", 11, 62002) == 1 &&
+          !bw_mp_invite_ready(&v));
+    CHECK("wrong request ID cannot begin handoff",
+          bw_mp_invite_message(2, "mpjoin 76 2", 11, 62003) == 1 &&
+          !bw_mp_invite_ready(&v));
+    CHECK("wrong activity cannot begin handoff",
+          bw_mp_invite_message(2, "mpjoin 75 1", 11, 62004) == 1 &&
+          !bw_mp_invite_ready(&v));
+    CHECK("matching readiness begins handoff exactly once",
+          bw_mp_invite_message(2, "mpjoin 75 2", 11, 62005) == 1 &&
+          bw_mp_invite_ready(&v) && v.peer == 2 && v.request_id == 75 &&
+          v.kind == BW_MP_INVITE_TRADE && !v.initiator &&
+          !bw_mp_invite_ready(&v));
+    CHECK("second offer can be cancelled during readiness",
+          bw_mp_invite_message(2, "invite 76 2", 11, 62006) == 1 &&
+          bw_mp_invite_reply(1, 62007) == 0 && !bw_mp_invite_ready(&v) &&
+          bw_mp_invite_message(2, "cancel 76", 9, 62008) == 1 &&
+          !bw_mp_invite_ready(&v) && bw_mp_invite_view().state == BW_MP_INVITE_NONE);
+    CHECK("requester waits for handoff",
+          bw_mp_invite_request(2, BW_MP_INVITE_BATTLE, 62009) == 0);
+    id = bw_mp_invite_view().request_id;
+    snprintf(pkt, sizeof pkt, "answer %u 1", (unsigned)id);
+    (void)bw_mp_invite_message(2, pkt, (u32)strlen(pkt), 62010);
+    CHECK("requester also sends readiness", !bw_mp_invite_ready(&v));
+    snprintf(pkt, sizeof pkt, "mpjoin %u 1", (unsigned)id);
+    (void)bw_mp_invite_message(2, pkt, (u32)strlen(pkt), 62011);
+    CHECK("outgoing handoff retains the requester role",
+          bw_mp_invite_ready(&v) && v.initiator && v.kind == BW_MP_INVITE_BATTLE);
     puts(errors ? "test_mp_invite failed" : "test_mp_invite passed");
     return errors ? 1 : 0;
 }

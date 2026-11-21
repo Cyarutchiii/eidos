@@ -10,6 +10,7 @@
 static BwMpInviteIO g_io;
 static BwMpInviteView g_invite;
 static u64 g_deadline;
+static int g_ready_sent, g_ready_received;
 /* The relay delivers messages in order. Remember each sender's newest
  * request even after dismissal or a busy decline. */
 static u32 g_seen[BW_MP_PLAYERS_MAX];
@@ -61,6 +62,7 @@ static void clear_invite(void)
 {
     memset(&g_invite, 0, sizeof g_invite);
     g_deadline = 0;
+    g_ready_sent = g_ready_received = 0;
 }
 
 void bw_mp_invite_reset(void)
@@ -90,6 +92,7 @@ int bw_mp_invite_request(u32 peer, BwMpInviteKind kind, u64 now_ms)
         return -1;
     }
     g_invite.state = BW_MP_INVITE_OUTGOING;
+    g_invite.initiator = 1;
     g_invite.kind = kind;
     g_invite.peer = peer;
     g_invite.request_id = id;
@@ -118,7 +121,8 @@ int bw_mp_invite_reply(int accept, u64 now_ms)
 
 void bw_mp_invite_dismiss(void)
 {
-    if (g_invite.state == BW_MP_INVITE_OUTGOING) {
+    if (g_invite.state == BW_MP_INVITE_OUTGOING ||
+        g_invite.state == BW_MP_INVITE_ACCEPTED) {
         (void)send_cancel(g_invite.peer, g_invite.request_id);
     } else if (g_invite.state == BW_MP_INVITE_INCOMING) {
         (void)send_pair(g_invite.peer, "answer", g_invite.request_id, 0u);
@@ -153,7 +157,7 @@ int bw_mp_invite_message(u32 peer, const void *data, u32 size, u64 now_ms)
 {
     const unsigned char *p, *end;
     u32 id, value = 0;
-    int is_invite, is_answer, is_cancel;
+    int is_invite, is_answer, is_cancel, is_ready;
 
     if (data == NULL || size < 7) {
         return 0;
@@ -161,7 +165,8 @@ int bw_mp_invite_message(u32 peer, const void *data, u32 size, u64 now_ms)
     is_invite = memcmp(data, "invite ", 7) == 0;
     is_answer = memcmp(data, "answer ", 7) == 0;
     is_cancel = memcmp(data, "cancel ", 7) == 0;
-    if (!is_invite && !is_answer && !is_cancel) {
+    is_ready = memcmp(data, "mpjoin ", 7) == 0;
+    if (!is_invite && !is_answer && !is_cancel && !is_ready) {
         return 0;
     }
     if (size > 28 || peer == 0 || peer > BW_MP_PLAYERS_MAX) {
@@ -199,10 +204,31 @@ int bw_mp_invite_message(u32 peer, const void *data, u32 size, u64 now_ms)
             g_invite.state = value && eligible(peer) ?
                 BW_MP_INVITE_ACCEPTED : BW_MP_INVITE_DENIED;
             g_deadline = now_ms + BW_MP_INVITE_RESULT_MS;
-        } else if (is_cancel && g_invite.state == BW_MP_INVITE_INCOMING) {
+        } else if (is_ready && g_invite.state == BW_MP_INVITE_ACCEPTED &&
+                   value == (u32)g_invite.kind) {
+            g_ready_received = 1;
+        } else if (is_cancel && (g_invite.state == BW_MP_INVITE_INCOMING ||
+                                 g_invite.state == BW_MP_INVITE_ACCEPTED)) {
             clear_invite();
         }
     }
+    return 1;
+}
+
+int bw_mp_invite_ready(BwMpInviteView *out)
+{
+    if (g_invite.state != BW_MP_INVITE_ACCEPTED || !eligible(g_invite.peer)) {
+        return 0;
+    }
+    if (!g_ready_sent) {
+        g_ready_sent = send_pair(g_invite.peer, "mpjoin", g_invite.request_id,
+                                 (u32)g_invite.kind) == 0;
+    }
+    if (!g_ready_sent || !g_ready_received) {
+        return 0;
+    }
+    *out = g_invite;
+    clear_invite();
     return 1;
 }
 
@@ -214,7 +240,8 @@ void bw_mp_invite_tick(u64 now_ms)
     if (now_ms < g_deadline) {
         return;
     }
-    if (g_invite.state == BW_MP_INVITE_OUTGOING) {
+    if (g_invite.state == BW_MP_INVITE_OUTGOING ||
+        g_invite.state == BW_MP_INVITE_ACCEPTED) {
         (void)send_cancel(g_invite.peer, g_invite.request_id);
     } else if (g_invite.state == BW_MP_INVITE_INCOMING) {
         (void)send_pair(g_invite.peer, "answer", g_invite.request_id, 0u);
@@ -233,7 +260,8 @@ void bw_mp_invite_peer_left(u32 peer, u64 now_ms)
     }
     if (g_invite.peer == peer &&
         (g_invite.state == BW_MP_INVITE_INCOMING ||
-         g_invite.state == BW_MP_INVITE_OUTGOING)) {
+         g_invite.state == BW_MP_INVITE_OUTGOING ||
+         g_invite.state == BW_MP_INVITE_ACCEPTED)) {
         g_invite.state = BW_MP_INVITE_CANCELLED;
         g_deadline = now_ms + BW_MP_INVITE_RESULT_MS;
     }

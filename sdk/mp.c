@@ -45,8 +45,10 @@
 
 #include "mp.h"
 #include "mp_invite.h"
+#include "link.h"
 #include "mod_loader.h"
 #include "mod_net.h"
+#include "overlay_image.h"
 #include "plat_dir.h"
 #include "plat_save.h"
 #include "plat_thread.h"
@@ -2263,6 +2265,38 @@ static struct {
 
 typedef struct BwMpVec { s32 x, y, z; } BwMpVec;
 
+/* aletheia src/game/arm9/zonedata_types.h, on both host pointer widths. */
+typedef struct BwMpLocation {
+    u32 type;
+    u16 zone;
+    s16 exit_id, dir;
+    u16 exit_offset;
+    u32 pos_type;
+    BwMpVec pos;
+} BwMpLocation;
+
+extern void ov020_EVENT_MAPCHANGE_GetCurrentLocation(BwMpLocation *, void *) BW_MP_WEAK;
+extern void *ov020_EVENT_MAPCHANGE_CreateFixedZoneEvent(void *, void *) BW_MP_WEAK;
+extern void GAMESYSTEM_SetEvent(void *, void *) BW_MP_WEAK;
+extern void *GAMESYSTEM_GetGameComm(const void *) BW_MP_WEAK;
+extern u32 GAME_COMM_GetKind(const void *) BW_MP_WEAK;
+extern const BwMpLocation *GAME_DATA_GetSpecialLocation(void *) BW_MP_WEAK;
+extern void GAME_DATA_SetSpecialLocation(void *, const BwMpLocation *) BW_MP_WEAK;
+
+#define BW_MP_UNION_ZONE 0x1a6u
+
+static struct {
+    BwMpInviteView invite;
+    BwMpLocation previous_special;
+    u64 entered_ms;
+    int arrived;
+    int radio_closed;
+    int choice_used;
+    int talk_started;
+    int native_active;
+} g_union;
+
+
 extern void *FIELDMAP_GetFieldPlayer(void *fieldMap) BW_MP_WEAK;
 extern u16   FIELDMAP_GetZoneId(void *fieldMap) BW_MP_WEAK;
 extern void  FIELD_PLAYER_GetPos(void *player, BwMpVec *out) BW_MP_WEAK;
@@ -2422,7 +2456,7 @@ static int invite_place(u16 *zone, BwMpVec *pos, u8 *dir)
     void *pl;
 
     if ((g_mp.state != BW_MP_PLAYING && g_mp.state != BW_MP_GRACE) ||
-        !g_mp.in_game || bw_mp_paused() ||
+        !g_mp.in_game || g_union.invite.peer != 0 || bw_mp_paused() ||
         FIELDMAP_GetFieldPlayer == NULL || FIELDMAP_GetZoneId == NULL ||
         FIELD_PLAYER_GetPos == NULL || FIELD_PLAYER_GetDirDisp == NULL) {
         return 0;
@@ -2510,6 +2544,127 @@ u32 bw_mp_interact_target(void)
     return 0;
 }
 
+static int invite_union_overlays(BwMpInviteKind kind)
+{
+    if (bw_ovl_image(11) == NULL || bw_ovl_image(12) == NULL ||
+        bw_ovl_image(19) == NULL || bw_ovl_image(20) == NULL ||
+        bw_ovl_image(21) == NULL || bw_ovl_image(31) == NULL) {
+        return 0;
+    }
+    if (kind == BW_MP_INVITE_TRADE) {
+        return bw_ovl_image(119) != NULL && bw_ovl_image(195) != NULL;
+    }
+    return bw_ovl_image(93) != NULL && bw_ovl_image(94) != NULL;
+}
+
+/* Preserve the co-op backup path and use the game's return warp. */
+static void invite_union_reset(void)
+{
+    bw_link_pair_close();
+    memset(&g_union, 0, sizeof(g_union));
+}
+
+static void invite_union_frame(void)
+{
+    void *fm, *gs, *gd, *event, *comm;
+    BwMpLocation location = {0};
+    const BwMpLocation *special;
+    BwMpInviteView offer = bw_mp_invite_view();
+
+    if (g_union.invite.peer == 0 && offer.state != BW_MP_INVITE_ACCEPTED) {
+        return;
+    }
+    fm = field_running();
+    if (fm == NULL) {
+        return;
+    }
+    gs = *(void **)bw_dsref__GameSystemGlobal;
+    gd = GAMESYSTEM_GetGameData(gs);
+    if (gd == NULL || FIELDMAP_GetZoneId == NULL) {
+        return;
+    }
+    if (g_union.invite.peer != 0) {
+        if (FIELDMAP_GetZoneId(fm) == BW_MP_UNION_ZONE) {
+            g_union.arrived = 1;
+            if (!g_union.native_active && !g_union.radio_closed &&
+                g_mp.now_ms - g_union.entered_ms >= 120000u) {
+                bw_link_pair_close();
+                g_union.radio_closed = 1;
+            }
+        } else if (g_union.arrived || g_mp.now_ms - g_union.entered_ms >= 120000u) {
+            GAME_DATA_SetSpecialLocation(gd, &g_union.previous_special);
+            invite_union_reset();
+        }
+        return;
+    }
+    if (!invite_union_overlays(offer.kind) ||
+        ov020_EVENT_MAPCHANGE_GetCurrentLocation == NULL ||
+        ov020_EVENT_MAPCHANGE_CreateFixedZoneEvent == NULL ||
+        GAMESYSTEM_SetEvent == NULL || GAMESYSTEM_GetGameComm == NULL ||
+        GAME_COMM_GetKind == NULL || GAME_DATA_GetSpecialLocation == NULL ||
+        GAME_DATA_SetSpecialLocation == NULL || !bw_link_pair_available() ||
+        FIELDMAP_GetZoneId(fm) == BW_MP_UNION_ZONE) {
+        return;
+    }
+    comm = GAMESYSTEM_GetGameComm(gs);
+    special = GAME_DATA_GetSpecialLocation(gd);
+    if (comm == NULL || GAME_COMM_GetKind(comm) != 0 || special == NULL ||
+        !bw_mp_invite_ready(&offer)) {
+        return;
+    }
+    if (bw_link_pair_open(offer.peer, offer.request_id, offer.initiator) != 0) {
+        return;
+    }
+    event = ov020_EVENT_MAPCHANGE_CreateFixedZoneEvent(gs, fm);
+    if (event == NULL) {
+        bw_link_pair_close();
+        return;
+    }
+    ov020_EVENT_MAPCHANGE_GetCurrentLocation(&location, fm);
+    g_union.previous_special = *special;
+    GAME_DATA_SetSpecialLocation(gd, &location);
+    g_union.invite = offer;
+    g_union.entered_ms = g_mp.now_ms;
+    pos_hide_all();
+    GAMESYSTEM_SetEvent(gs, event);
+}
+
+/* The requester starts the native negotiation once the paired radio has
+ * produced an idle avatar. The recipient takes the game's normal child path. */
+int bw_mp_union_auto_talk(int started)
+{
+    if (g_union.invite.peer == 0 || !g_union.invite.initiator ||
+        g_union.radio_closed || g_union.talk_started) {
+        return 0;
+    }
+    g_union.talk_started = started != 0;
+    return 1;
+}
+
+void bw_mp_union_native_active(void)
+{
+    if (g_union.invite.peer != 0) {
+        g_union.native_active = 1;
+    }
+}
+
+int bw_mp_union_return_requested(void)
+{
+    return g_union.invite.peer != 0 && g_union.radio_closed;
+}
+
+/* Called only by the native Union Room parent menu after negotiation. */
+int bw_mp_union_menu_choice(void)
+{
+    if (g_union.invite.peer == 0 || g_union.radio_closed ||
+        g_union.choice_used) {
+        return -1;
+    }
+    g_union.choice_used = 1;
+    /* UNION_ONESELF_TalkParentMain: trade or the battle rules submenu. */
+    return g_union.invite.kind == BW_MP_INVITE_TRADE ? 0x18 : 0x1b;
+}
+
 /*
  * The other players' avatars, once a frame.  `quiet` is 1 when the field
  * runs and no field event does: only then is an avatar made (the entity
@@ -2585,7 +2740,7 @@ static void pos_frame(void)
         g_me.swept = fm;
     }
     if (fm == NULL || !read_me(fm)) {
-        if (any != NULL) {
+        if (any != NULL && g_union.invite.peer == 0) {
             pos_show_others(0);
         }
         return;
@@ -2616,7 +2771,9 @@ static void pos_frame(void)
     if (g_me.create_hold > 0) {
         g_me.create_hold--;
     }
-    pos_show_others(g_me.create_hold == 0);
+    if (g_union.invite.peer == 0) {
+        pos_show_others(g_me.create_hold == 0);
+    }
 }
 
 int bw_mp_peer_visible(u32 peer)
@@ -2637,6 +2794,10 @@ void bw_mp_on_net(u32 peer, int kind, const void *buf, u32 size)
         char why[64];
 
         bw_mp_invite_reset();
+        if (g_union.invite.peer != 0) {
+            bw_link_pair_close();
+            g_union.radio_closed = 1;
+        }
 
         copy_n(why, sizeof(why), (const char *)buf, size);
         if (strcmp(why, "lost") == 0 && g_mp.state != BW_MP_LOBBY) {
@@ -2652,6 +2813,10 @@ void bw_mp_on_net(u32 peer, int kind, const void *buf, u32 size)
         return;
     }
     if (kind == (int)BW_SESSION_LEAVE) {
+        if (g_union.invite.peer == peer) {
+            bw_link_pair_close();
+            g_union.radio_closed = 1;
+        }
         bw_mp_invite_peer_left(peer, g_mp.now_ms);
         pos_forget(peer);
     }
@@ -2701,6 +2866,7 @@ void bw_mp_on_net(u32 peer, int kind, const void *buf, u32 size)
 
 static void begin(int host, const char *code)
 {
+    invite_union_reset();
     bw_mp_invite_reset();
     bw_mp_invite_set_io(&k_invite_io);
     sends_clear();
@@ -2796,6 +2962,7 @@ int bw_mp_join(const char *code)
 
 void bw_mp_leave(void)
 {
+    invite_union_reset();
     bw_mp_invite_dismiss();
     if (g_mp.in_game && !g_mp.host) {
         joiner_upload_send(1);          /* the save's last change, not lost */
@@ -3310,6 +3477,7 @@ void bw_mp_frame_at(u64 t)
     }
     field_quiet_save();
     if (g_mp.in_game && (g_mp.state == BW_MP_PLAYING || g_mp.state == BW_MP_GRACE)) {
+        invite_union_frame();
         pos_frame();
         events_frame();
     }
@@ -3412,6 +3580,7 @@ void bw_mp_set_local(char game, const char *mods)
 
 void bw_mp_reset(void)
 {
+    invite_union_reset();
     bw_mp_invite_reset();
     bw_mp_invite_set_io(NULL);
     sends_clear();

@@ -197,13 +197,29 @@ Only the addressed peer's matching response can resolve a request.
 Pending requests time out after 30 seconds and clear when either
 player disconnects. Both clients need an invitation-capable build.
 
-Acceptance confirms consent only. The existing Union Room battle and
-trade flows run over Link play, which cannot coexist with a co-op session
-(see [Link play](link-play.md)). There's no supported handoff that
-preserves the co-op session and both players' save state. For now,
-players can leave co-op and use the existing Link workflow separately.
-Dual-screen presentation and two-client gameplay validation remain
-outstanding.
+### Union Room handoff (experimental)
+
+After acceptance, both clients exchange readiness for the same invitation
+ID and activity. When both are ready on a quiet field, the game schedules
+its Union Room entry event. Each client stays on the existing co-op
+connection and keeps its co-op save path. Link radio frames go only to the
+invited peer and carry the invitation ID so old frames cannot reach a
+later pair.
+
+The requester starts the normal Union Room conversation as soon as the
+partner appears. The menu selects the corresponding native activity.
+Continue through the Union Room's confirmation, party selection, and
+battle rules as prompted. Trades use the native trade process, including
+its save handling. Leaving through the Union Room's exit returns each
+player to their original location and closes the private radio channel.
+If the partner disconnects, the radio closes and the room can return the
+player once the native flow is idle.
+
+This handoff requires an invitation-capable build with the Union Room and
+the chosen activity's overlays on both clients. The overworld prompt is
+available in the one-screen layout. Two-client play with game data is
+still required to verify a completed trade survives rejoining and a
+battle reaches playable turns.
 
 ## Positions (built)
 

@@ -164,6 +164,12 @@ u32 bw_mp_interact_target(void);
 int bw_mp_interact_request(u32 peer, int battle_or_trade);
 int bw_mp_interact_reply(int accept);
 
+/* One-shot activity selection for the native Union Room menu. */
+int bw_mp_union_menu_choice(void);
+int bw_mp_union_auto_talk(int started);
+void bw_mp_union_native_active(void);
+int bw_mp_union_return_requested(void);
+
 /* The timers: once a frame, also while the game is held. */
 void bw_mp_frame(void);
 

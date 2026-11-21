@@ -3615,7 +3615,7 @@ static void peer_invite_overlay(EidosUiCtx *c, const char *scene)
     } else if (offer.state == BW_MP_INVITE_ACCEPTED) {
         snprintf(title, sizeof title, "%s invitation accepted",
                  offer.kind == BW_MP_INVITE_BATTLE ? "Battle" : "Trade");
-        snprintf(message, sizeof message, "Use Link play to battle or trade.");
+        snprintf(message, sizeof message, "Connecting to the Union Room...");
     } else {
         const char *why = offer.state == BW_MP_INVITE_DENIED ? "Request declined" :
                           offer.state == BW_MP_INVITE_EXPIRED ? "Request expired" :

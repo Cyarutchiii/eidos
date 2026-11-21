@@ -48,6 +48,8 @@ static struct {
     u32 q_head, q_count;
     u32 dropped;
     int was_active;
+    u32 pair_peer;
+    u8 pair_tag[5];
     /* the shared air */
     int air_installed;          /* the radio is on the air (wm.c)          */
     int air_want;               /* the game's radio is on                  */
@@ -82,6 +84,17 @@ static void unlock(void)
 static int air_send(void *user, const u8 *bytes, u32 n)
 {
     (void)user;
+    if (g_link.pair_peer != 0) {
+        u8 packet[BW_WM_AIR_MAX + sizeof(g_link.pair_tag)];
+
+        if (n > BW_WM_AIR_MAX) {
+            return -1;
+        }
+        memcpy(packet, g_link.pair_tag, sizeof(g_link.pair_tag));
+        memcpy(packet + sizeof(g_link.pair_tag), bytes, n);
+        return bw_mod_net_link_send(g_link.pair_peer, packet,
+                                    n + sizeof(g_link.pair_tag)) == 0 ? 0 : -1;
+    }
     return bw_mod_net_link_send(0, bytes, n) == 0 ? 0 : -1;
 }
 
@@ -107,9 +120,21 @@ static int air_recv(void *user, u8 *bytes, u32 cap, u32 *n)
 
 static void on_link(u32 peer, int kind, const void *buf, u32 size)
 {
-    (void)peer;
-    if (kind != BW_SESSION_MESSAGE || buf == NULL || size == 0 || size > BW_WM_AIR_MAX)
+    if (kind != BW_SESSION_MESSAGE || buf == NULL) {
         return;
+    }
+    if (g_link.pair_peer != 0) {
+        if (peer != g_link.pair_peer || size <= sizeof(g_link.pair_tag) ||
+            memcmp(buf, g_link.pair_tag, sizeof(g_link.pair_tag) - 1) != 0 ||
+            ((const u8 *)buf)[4] != (u8)(g_link.pair_tag[4] ^ 1u)) {
+            return;
+        }
+        buf = (const u8 *)buf + sizeof(g_link.pair_tag);
+        size -= sizeof(g_link.pair_tag);
+    }
+    if (size == 0 || size > BW_WM_AIR_MAX) {
+        return;
+    }
     lock();
     if (g_link.q != NULL && g_link.q_count < QUEUE_MAX) {
         Msg *m = &g_link.q[(g_link.q_head + g_link.q_count) % QUEUE_MAX];
@@ -209,7 +234,7 @@ static void air_try(void)
 {
     u64 now = link_ms();
 
-    if (g_link.state == BW_LINK_OPEN || g_link.air_up || g_link.air_busy || !g_link.air_want)
+    if (g_link.pair_peer != 0 || g_link.state == BW_LINK_OPEN || g_link.air_up || g_link.air_busy || !g_link.air_want)
         return;
     if (g_air_thread != NULL) {
         /* air_busy is 0: the thread is at its end, the join is at once */
@@ -325,6 +350,56 @@ void bw_link_mac(u8 out[6])
 /* ------------------------------------------------------------------ */
 /* The session                                                         */
 /* ------------------------------------------------------------------ */
+
+int bw_link_pair_available(void)
+{
+    const char *off = getenv("EIDOS_NO_LINK");
+
+    return g_link.pair_peer == 0 && g_link.state != BW_LINK_OPEN &&
+           !g_link.air_up && !g_link.air_busy && bw_mod_net_session_active() &&
+           (off == NULL || off[0] == '\0' || off[0] == '0');
+}
+
+int bw_link_pair_open(u32 peer, u32 request, int initiator)
+{
+    unsigned i;
+
+    if (peer == 0 || request == 0 || !bw_link_pair_available()) {
+        return -1;
+    }
+    air_install();
+    if (g_link.q == NULL) {
+        bw_arm7_wm_set_air(NULL);
+        bw_mod_net_set_link_handler(NULL);
+        g_link.air_installed = 0;
+        return -1;
+    }
+    lock();
+    g_link.q_head = g_link.q_count = 0;
+    unlock();
+    for (i = 0; i < sizeof(g_link.pair_tag) - 1; i++) {
+        g_link.pair_tag[i] = (u8)(request >> (8u * i));
+    }
+    g_link.pair_tag[4] = initiator != 0;
+    g_link.pair_peer = peer;
+    return 0;
+}
+
+void bw_link_pair_close(void)
+{
+    if (g_link.pair_peer == 0) {
+        return;
+    }
+    /* WM flushes pending frames while detaching. Keep them addressed. */
+    bw_arm7_wm_set_air(NULL);
+    bw_mod_net_set_link_handler(NULL);
+    g_link.pair_peer = 0;
+    g_link.air_want = 0;
+    g_link.air_installed = 0;
+    lock();
+    g_link.q_count = 0;
+    unlock();
+}
 
 static void radio_on(void)
 {
@@ -462,6 +537,8 @@ u32 bw_link_players(void)
 
 int bw_link_wireless_on(void)
 {
+    if (g_link.pair_peer != 0)
+        return 1;
     if (g_link.state == BW_LINK_OPEN)
         return bw_arm7_wm_has_air();
     if (!air_allowed())
