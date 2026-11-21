@@ -586,6 +586,7 @@ set(BW_SDK_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/sdk/mod_export.c        # a Pokemon's export and import
     ${CMAKE_CURRENT_SOURCE_DIR}/sdk/mod_net.c          # the peer sessions and the external control
     ${CMAKE_CURRENT_SOURCE_DIR}/sdk/mp.c               # multiplayer: the lobby, the start and the pause
+    ${CMAKE_CURRENT_SOURCE_DIR}/sdk/mp_invite.c        # adjacent-player battle/trade invitations
     ${CMAKE_CURRENT_SOURCE_DIR}/sdk/link.c             # Link sessions: the radio over the relay
     ${CMAKE_CURRENT_SOURCE_DIR}/sdk/tls_roots.c        # the roots a TLS relay is checked against
     ${CMAKE_CURRENT_SOURCE_DIR}/sdk/save_slots.c       # several single-player saves
@@ -2045,6 +2046,11 @@ target_include_directories(test_mp PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/sdk ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 target_link_libraries(test_mp PRIVATE eidos)
 add_test(NAME test_mp COMMAND test_mp)
+
+add_executable(test_mp_invite ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mp_invite.c)
+target_include_directories(test_mp_invite PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sdk)
+target_link_libraries(test_mp_invite PRIVATE eidos)
+add_test(NAME test_mp_invite COMMAND test_mp_invite)
 
 add_test(NAME test_mod_wasm COMMAND test_mod_wasm)
 # With the runtime, the test also registers an import of its own (an event

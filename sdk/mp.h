@@ -158,6 +158,12 @@ int bw_mp_relay_restarted(void);
 u32  bw_mp_player_count(void);
 int  bw_mp_player_at(u32 index, BwMpPlayer *out);
 
+/* The connected, adjacent player directly in front of our trainer, or 0.
+ * Only available on a quiet field with a visible multiplayer avatar. */
+u32 bw_mp_interact_target(void);
+int bw_mp_interact_request(u32 peer, int battle_or_trade);
+int bw_mp_interact_reply(int accept);
+
 /* The timers: once a frame, also while the game is held. */
 void bw_mp_frame(void);
 

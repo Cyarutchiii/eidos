@@ -181,6 +181,30 @@ use multiplayer for now (SPEC section 17).
 - The title menu's MULTIPLAYER line (in the Mic Test's place, third)
   opens Host / Join.
 
+## Overworld invitations (experimental)
+
+In the one-screen field layout, stand one tile away on the same level,
+face the other player's visible avatar, and press **A**. Choose
+**Challenge to Battle** or **Trade**. The other player sees your roster
+name and can choose **Accept** or **Deny**. Press **B** while waiting to
+cancel, or while receiving an invitation to decline.
+
+Invitations use addressed messages over the existing `eidos:port`
+session. The recipient must be connected and adjacent in the same zone.
+Each sender's newest request ID is tracked for the lifetime of their
+relay connection so duplicate offers cannot reopen or deny a prompt.
+Only the addressed peer's matching response can resolve a request.
+Pending requests time out after 30 seconds and clear when either
+player disconnects. Both clients need an invitation-capable build.
+
+Acceptance confirms consent only. The existing Union Room battle and
+trade flows run over Link play, which cannot coexist with a co-op session
+(see [Link play](link-play.md)). There's no supported handoff that
+preserves the co-op session and both players' save state. For now,
+players can leave co-op and use the existing Link workflow separately.
+Dual-screen presentation and two-client gameplay validation remain
+outstanding.
+
 ## Positions (built)
 
 - Each game sends its player's place to every other player

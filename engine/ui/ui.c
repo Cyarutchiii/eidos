@@ -31,6 +31,8 @@
 #include "theme.h"
 #include "dsmem.h"
 #include "input.h"
+#include "mp.h"
+#include "mp_invite.h"
 #include "textbox.h"
 #include "settings.h"
 #include "overlay.h"
@@ -3518,6 +3520,172 @@ static void set_safe(const EidosUiFrame *in)
     g_ctx.bar_top = -1;
 }
 
+
+/* Multiplayer overworld interaction: the field avatars have no DS event
+ * scripts. The port owns their interaction windows, but uses the field's
+ * same textbox/theme primitives and gamepad/touch input as other recipes. */
+static u32 g_peer_offer;
+static int g_peer_choice;
+static BwMpInviteState g_peer_last_state;
+static u32 g_peer_last_id;
+
+static void peer_name(u32 peer, char *out, size_t n)
+{
+    u32 i;
+    BwMpPlayer p;
+
+    snprintf(out, n, "Player");
+    for (i = 0; i < bw_mp_player_count(); i++) {
+        if (bw_mp_player_at(i, &p) == 0 && p.peer == peer) {
+            snprintf(out, n, "%s", p.name);
+            return;
+        }
+    }
+}
+
+static void peer_invite_overlay(EidosUiCtx *c, const char *scene)
+{
+    BwMpInviteView offer = bw_mp_invite_view();
+    u32 keys = eidos_ui_keys_pressed();
+    int just_opened = 0;
+    int new_offer = 0;
+    int cw = c->canvas->w, ch = c->canvas->h;
+    int w, h, x, y, choice_count = 0, i;
+    int active = offer.state != BW_MP_INVITE_NONE;
+    char name[BW_MP_NAME_MAX + 1], title[160], message[160];
+    const char *labels[2] = { NULL, NULL };
+
+    if (offer.state != g_peer_last_state || offer.request_id != g_peer_last_id) {
+        /* A held when the packet arrives must not silently accept it. */
+        g_peer_last_state = offer.state;
+        g_peer_last_id = offer.request_id;
+        g_peer_choice = 0;
+        new_offer = 1;
+        keys &= ~(BW_KEY_A | BW_KEY_B);
+    }
+    if (strcmp(scene, "field") != 0) {
+        g_peer_offer = 0;
+        /* Keep a pending offer while a menu is open. The state machine
+         * expires it if the player never returns to the field. */
+        return;
+    }
+    if (active) {
+        g_peer_offer = 0;
+    } else {
+        u32 target = bw_mp_interact_target();
+
+        if (g_peer_offer != 0 && target != g_peer_offer) {
+            g_peer_offer = 0;
+        }
+        if (target != 0 && g_peer_offer == 0) {
+            /* A is the field's normal interact button, also on a pad. */
+            eidos_ui_take_keys(BW_KEY_A);
+            if (keys & BW_KEY_A) {
+                g_peer_offer = target;
+                g_peer_choice = 0;
+                just_opened = 1;
+            }
+        }
+    }
+    if (!active && !g_peer_offer) {
+        return;
+    }
+
+    eidos_ui_take_keys(BW_KEY_GAME);
+    if (just_opened) {
+        keys &= ~BW_KEY_A; /* opening A must not pick the first option */
+    }
+    peer_name(active ? offer.peer : g_peer_offer, name, sizeof name);
+    message[0] = '\0';
+    title[0] = '\0';
+    if (!active) {
+        snprintf(title, sizeof title, "Talk to %s", name);
+        labels[0] = "Challenge to Battle";
+        labels[1] = "Trade";
+        choice_count = 2;
+    } else if (offer.state == BW_MP_INVITE_INCOMING) {
+        snprintf(title, sizeof title, "%s wants to %s!", name,
+                 offer.kind == BW_MP_INVITE_BATTLE ? "battle" : "trade");
+        labels[0] = "Accept";
+        labels[1] = "Deny";
+        choice_count = 2;
+    } else if (offer.state == BW_MP_INVITE_OUTGOING) {
+        snprintf(title, sizeof title, "Waiting for %s...", name);
+        snprintf(message, sizeof message, "Press B to cancel the request.");
+    } else if (offer.state == BW_MP_INVITE_ACCEPTED) {
+        snprintf(title, sizeof title, "%s invitation accepted",
+                 offer.kind == BW_MP_INVITE_BATTLE ? "Battle" : "Trade");
+        snprintf(message, sizeof message, "Use Link play to battle or trade.");
+    } else {
+        const char *why = offer.state == BW_MP_INVITE_DENIED ? "Request declined" :
+                          offer.state == BW_MP_INVITE_EXPIRED ? "Request expired" :
+                          "Player disconnected";
+        snprintf(title, sizeof title, "%s", why);
+        snprintf(message, sizeof message, "Press A or B to close.");
+    }
+    if (keys & BW_KEY_B) {
+        if (active) {
+            bw_mp_invite_dismiss();
+        }
+        g_peer_offer = 0;
+        return;
+    }
+    if (choice_count != 0 && (keys & (BW_KEY_UP | BW_KEY_DOWN))) {
+        g_peer_choice ^= 1;
+        eidos_ui_sound(0x548);
+    }
+    if (choice_count == 0 && offer.state != BW_MP_INVITE_OUTGOING &&
+        (keys & BW_KEY_A)) {
+        bw_mp_invite_dismiss();
+        return;
+    }
+
+    w = cw - 24;
+    if (w > 330) w = 330;
+    h = choice_count ? 114 : 88;
+    x = (cw - w) / 2;
+    y = ch - h - ui_bar_h(c) - 9;
+    if (y < c->safe_t + 8) y = c->safe_t + 8;
+    ui_fill(c, 0, 0, cw, ch, 0x080F1Bu, 110);
+    ui_textbox_frame(c, UI_TEXTBOX_NARRATION, x, y, w, h);
+    ui_text(c, x + 15, y + 9, title, 0x17283Du, -1, UI_FONT_LARGE, 1);
+    if (choice_count) {
+        for (i = 0; i < choice_count; i++) {
+            int ry = y + 38 + i * 29;
+            EidosUiRect hit = { x + 12, ry, w - 24, 25 };
+            int click = !new_offer && !just_opened &&
+                        (eidos_ui_hit(hit) & EIDOS_UI_CLICK);
+            int selected = g_peer_choice == i;
+
+            if (click) {
+                g_peer_choice = i;
+                selected = 1;
+            }
+            ui_panel(c, hit.x, hit.y, hit.w, hit.h,
+                     UI_CUT_TL | UI_CUT_BR, 4,
+                     selected ? 0x006D9Du : 0x192B44u,
+                     selected ? UI_CYAN : 0x426078u, 245);
+            ui_text(c, hit.x + 10, hit.y + ui_text_y(hit.h, UI_FONT_MEDIUM),
+                    labels[i], UI_WHITE, -1, UI_FONT_MEDIUM, 1);
+            if (click || (selected && (keys & BW_KEY_A))) {
+                if (active) {
+                    (void)bw_mp_interact_reply(i == 0);
+                } else {
+                    if (bw_mp_interact_request(g_peer_offer,
+                          i == 0 ? BW_MP_INVITE_BATTLE : BW_MP_INVITE_TRADE) == 0) {
+                        g_peer_offer = 0;
+                    }
+                }
+                eidos_ui_sound(0x54A);
+                break;
+            }
+        }
+    } else {
+        ui_text(c, x + 15, y + 40, message, 0x17283Du, -1,
+                UI_FONT_SMALL, 1);
+    }
+}
+
 void eidos_ui_frame(const EidosUiFrame *in, EidosUiView *view,
                     const EidosUiCanvas **canvas)
 {
@@ -3732,6 +3900,7 @@ void eidos_ui_frame(const EidosUiFrame *in, EidosUiView *view,
         }
         r->run(&g_ctx, view, &f);
         try_overlay(&g_ctx);
+        peer_invite_overlay(&g_ctx, r->name);
         save_failing_notice(&g_ctx);
         speed_badge(&g_ctx, r->name);
         if (getenv("EIDOS_UI_TRACE") != NULL) {

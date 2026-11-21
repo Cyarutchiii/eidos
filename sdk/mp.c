@@ -44,6 +44,7 @@
 #include <string.h>
 
 #include "mp.h"
+#include "mp_invite.h"
 #include "mod_loader.h"
 #include "mod_net.h"
 #include "plat_dir.h"
@@ -2414,6 +2415,101 @@ static int pos_visible(u32 peer)
     return peer != g_net->self_peer();
 }
 
+/* Sample the local tile without modifying the position broadcast cache. */
+static int invite_place(u16 *zone, BwMpVec *pos, u8 *dir)
+{
+    void *fm;
+    void *pl;
+
+    if ((g_mp.state != BW_MP_PLAYING && g_mp.state != BW_MP_GRACE) ||
+        !g_mp.in_game || bw_mp_paused() ||
+        FIELDMAP_GetFieldPlayer == NULL || FIELDMAP_GetZoneId == NULL ||
+        FIELD_PLAYER_GetPos == NULL || FIELD_PLAYER_GetDirDisp == NULL) {
+        return 0;
+    }
+    fm = field_running();
+    if (fm == NULL || (pl = FIELDMAP_GetFieldPlayer(fm)) == NULL) {
+        return 0;
+    }
+    FIELD_PLAYER_GetPos(pl, pos);
+    *zone = FIELDMAP_GetZoneId(fm);
+    *dir = (u8)FIELD_PLAYER_GetDirDisp(pl);
+    return 1;
+}
+
+static int invite_nearby(u32 peer, u16 zone, const BwMpVec *pos)
+{
+    const BwMpPos *p;
+
+    if (peer == 0 || peer > BW_MP_PLAYERS_MAX || !pos_visible(peer)) {
+        return 0;
+    }
+    p = &g_pos[peer - 1];
+    return p->have && p->zone == zone && p->y == cell_of(pos->y) &&
+           abs((int)p->x - cell_of(pos->x)) +
+           abs((int)p->z - cell_of(pos->z)) == 1;
+}
+
+static int invite_eligible(u32 peer)
+{
+    BwMpVec pos = {0};
+    u16 zone;
+    u8 dir;
+
+    return invite_place(&zone, &pos, &dir) && invite_nearby(peer, zone, &pos);
+}
+
+static int invite_send(u32 peer, const void *buf, u32 size)
+{
+    return g_net->send(peer, buf, size);
+}
+
+static const BwMpInviteIO k_invite_io = { invite_send, invite_eligible };
+
+int bw_mp_interact_request(u32 peer, int action)
+{
+    if (peer == 0 || peer != bw_mp_interact_target()) {
+        return -1;
+    }
+    return bw_mp_invite_request(peer, (BwMpInviteKind)action, g_mp.now_ms);
+}
+
+int bw_mp_interact_reply(int accept)
+{
+    return bw_mp_invite_reply(accept, g_mp.now_ms);
+}
+
+u32 bw_mp_interact_target(void)
+{
+    BwMpVec pos = {0};
+    u32 peer;
+    u16 zone;
+    u8 dir;
+    int x, z;
+
+    if (!invite_place(&zone, &pos, &dir)) {
+        return 0;
+    }
+    x = cell_of(pos.x);
+    z = cell_of(pos.z);
+    switch (dir) {
+    case 0: z--; break;
+    case 1: z++; break;
+    case 2: x--; break;
+    case 3: x++; break;
+    default: return 0;
+    }
+    for (peer = 1u; peer <= BW_MP_PLAYERS_MAX; peer++) {
+        const BwMpPos *p = &g_pos[peer - 1u];
+
+        if (p->avatar != 0 && p->x == x && p->z == z &&
+            invite_nearby(peer, zone, &pos)) {
+            return peer;
+        }
+    }
+    return 0;
+}
+
 /*
  * The other players' avatars, once a frame.  `quiet` is 1 when the field
  * runs and no field event does: only then is an avatar made (the entity
@@ -2540,6 +2636,8 @@ void bw_mp_on_net(u32 peer, int kind, const void *buf, u32 size)
     if (kind == BW_MOD_NET_PORT_ENDED) {
         char why[64];
 
+        bw_mp_invite_reset();
+
         copy_n(why, sizeof(why), (const char *)buf, size);
         if (strcmp(why, "lost") == 0 && g_mp.state != BW_MP_LOBBY) {
             /* the relay is gone for this game: join the same code again */
@@ -2554,7 +2652,12 @@ void bw_mp_on_net(u32 peer, int kind, const void *buf, u32 size)
         return;
     }
     if (kind == (int)BW_SESSION_LEAVE) {
+        bw_mp_invite_peer_left(peer, g_mp.now_ms);
         pos_forget(peer);
+    }
+    if (kind == (int)BW_SESSION_MESSAGE &&
+        bw_mp_invite_message(peer, buf, size, g_mp.now_ms)) {
+        return;
     }
     if (kind == (int)BW_SESSION_MESSAGE && size > 4 && memcmp(buf, "pos ", 4) == 0) {
         /* a player's place, from any player */
@@ -2598,6 +2701,8 @@ void bw_mp_on_net(u32 peer, int kind, const void *buf, u32 size)
 
 static void begin(int host, const char *code)
 {
+    bw_mp_invite_reset();
+    bw_mp_invite_set_io(&k_invite_io);
     sends_clear();
     up_base_set(NULL, 0);
     pos_clear();
@@ -2691,6 +2796,7 @@ int bw_mp_join(const char *code)
 
 void bw_mp_leave(void)
 {
+    bw_mp_invite_dismiss();
     if (g_mp.in_game && !g_mp.host) {
         joiner_upload_send(1);          /* the save's last change, not lost */
     }
@@ -3157,6 +3263,11 @@ static void debug_avatar(void)
 void bw_mp_frame_at(u64 t)
 {
     g_mp.now_ms = t;
+    if (g_mp.state == BW_MP_PLAYING || g_mp.state == BW_MP_GRACE) {
+        bw_mp_invite_tick(t);
+    } else {
+        bw_mp_invite_reset();
+    }
     debug_avatar();
     sends_pump();
     if (g_mp.in_game && !g_mp.saving && bw_arm7_backup_writes != NULL &&
@@ -3301,6 +3412,8 @@ void bw_mp_set_local(char game, const char *mods)
 
 void bw_mp_reset(void)
 {
+    bw_mp_invite_reset();
+    bw_mp_invite_set_io(NULL);
     sends_clear();
     up_base_set(NULL, 0);
     memset(&g_sent_bytes, 0, sizeof(g_sent_bytes));
